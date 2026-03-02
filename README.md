@@ -14,11 +14,12 @@ on a single AMD GPU.
 | **Loop detection** | If a server holds the GPU at ≥ `loop_gpu_util_threshold`% for longer than `loop_max_busy_seconds` without completing a request, it is killed |
 | **Streaming support** | SSE / chunked responses (llama.cpp chat streaming) are forwarded correctly |
 | **Status endpoint** | `GET /proxy/status` returns live VRAM stats and per-server state |
+| **Logging** | `The output from llama-server etc can be collected and written to a logfile or forwarded to systemd's system log |
 
 ## Requirements
 
 ```
-pip install fastapi uvicorn httpx pyyaml
+pip install fastapi uvicorn httpx pyyaml logging
 ```
 
 rocm-smi must be on `$PATH` (it is if ROCm is installed correctly).

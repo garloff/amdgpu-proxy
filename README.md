@@ -116,3 +116,8 @@ route_prefixes:
 - `rocm-smi --json` output format varies slightly across ROCm versions.
   The parser targets ROCm 5.x / 6.x. If VRAM reads as 0, run
   `rocm-smi --showmeminfo vram --json` and adjust the key names in `GpuMonitor._query()`.
+
+## Copyright
+
+The code here has been developed with support from Claude. It is published under
+[Apache-2.0](LICENSE.md) license.

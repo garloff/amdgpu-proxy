@@ -4,7 +4,7 @@ gpu_inference_proxy.py — GPU-aware AI inference proxy
 Manages llama.cpp, stable-diffusion.cpp, and whisper.cpp server processes
 based on demand, VRAM pressure, idle timeouts, and infinite-loop detection.
 
-Author: generated for Kurt @ S7n Cloud Services
+Author: generated for Kurt @ S7n Cloud Services <s7h@garloff.de> by Claude
 License: Apache-2.0
 """
 

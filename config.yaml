@@ -1,0 +1,103 @@
+# gpu_inference_proxy — config.yaml
+# Adjust paths, ports, and model args to match your setup.
+
+proxy:
+  host: "0.0.0.0"     # 127.0.0.1 if you only access via reverse proxy
+  port: 9099
+  log_level: "info"   # debug | info | warning | error
+
+gpu:
+  device: 0                    # GPU index (rocm-smi card number)
+  vram_headroom_mb: 1024       # keep this many MB free before starting a new server
+  poll_interval: 2.0           # seconds between rocm-smi polls
+
+limits:
+  max_concurrent: 1            # max servers running simultaneously
+                               # set to 2 if you want to try e.g. llama+whisper with small models
+  idle_timeout: 300            # seconds idle → unload server (saves power)
+  loop_gpu_util_threshold: 75  # % GPU utilisation considered "server is busy"
+  loop_max_busy_seconds: 300   # kill server if busy this long without completing a request
+  loop_check_interval: 10      # how often (seconds) to evaluate loop condition
+  request_timeout: 600         # max seconds to wait for a proxied HTTP response
+
+servers:
+
+  # ─── llama.cpp ─────────────────────────────────────────────────────────
+  llama:
+    enabled: true
+    binary: /usr/local/bin/llama-server
+    args:
+      - --model
+      - /models/llama/Qwen3.5-35B-A3B-Q4_K_M.gguf
+      - --port
+      - "8081"
+      - --host
+      - "127.0.0.1"
+      - --fit         # offload as many layers as fit in the VRAM
+      - "on"
+      - --ctx-size
+      - "8192"
+      - --parallel
+      - "2"           # parallel slots for Open-WebUI
+      - --flash-attn  # FA2 — works on gfx1100 with recent ROCm
+    port: 8081
+    host: "127.0.0.1"
+    startup_timeout: 60
+    health_path: "/health"
+    # Route these request paths to llama-server.
+    # Open-WebUI uses the OpenAI-compatible /v1/ prefix.
+    route_prefixes:
+      - /v1/
+      - /api/          # legacy llama.cpp /api/generate etc.
+    env:
+      # Uncomment if you need explicit ROCm target override:
+      # ROCR_VISIBLE_DEVICES: "0"
+      # HSA_OVERRIDE_GFX_VERSION: "11.0.0"
+
+  # ─── stable-diffusion.cpp ──────────────────────────────────────────────
+  stable_diffusion:
+    enabled: true
+    binary: /usr/local/bin/sd-server
+    args:
+      - --model
+      - /models/sd/flux1-dev-Q8_0.gguf
+      - --port
+      - "8082"
+      - --host
+      - "127.0.0.1"
+      - --vae
+      - /models/sd/ae.safetensors
+      - --clip-l
+      - /models/sd/clip_l.safetensors
+      - --t5xxl
+      - /models/sd/t5xxl_fp16.safetensors
+    port: 8082
+    host: "127.0.0.1"
+    startup_timeout: 90        # SD models take longer to load
+    health_path: "/health"
+    route_prefixes:
+      - /sdapi/                # AUTOMATIC1111-compatible prefix
+      - /txt2img
+      - /img2img
+      # - /v1/images/generations  # caught in the code
+
+  # ─── whisper.cpp ───────────────────────────────────────────────────────
+  whisper:
+    enabled: true
+    binary: /usr/local/bin/whisper-server
+    args:
+      - --model
+      - /models/whisper/ggml-large-v3-turbo-q5_0.bin
+      - --port
+      - "8083"
+      - --host
+      - "127.0.0.1"
+      - --gpu-device
+      - "0"
+    port: 8083
+    host: "127.0.0.1"
+    startup_timeout: 30
+    health_path: "/health"
+    route_prefixes:
+      - /inference           # whisper.cpp native endpoint
+      - /whisper/            # optional namespace prefix

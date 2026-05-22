@@ -14,11 +14,11 @@ gpu:
 limits:
   max_concurrent: 1            # max servers running simultaneously
                                # set to 2 if you want to try e.g. llama+whisper with small models
-  idle_timeout: 300            # seconds idle → unload server (saves power)
+  idle_timeout: 100            # seconds idle → unload server (saves power) - reloading is fast
   loop_gpu_util_threshold: 75  # % GPU utilisation considered "server is busy"
-  loop_max_busy_seconds: 300   # kill server if busy this long without completing a request
+  loop_max_busy_seconds: 360   # kill server if busy this long without completing a request
   loop_check_interval: 10      # how often (seconds) to evaluate loop condition
-  request_timeout: 600         # max seconds to wait for a proxied HTTP response
+  request_timeout: 720         # max seconds to wait for a proxied HTTP response
 
 servers:
 

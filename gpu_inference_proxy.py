@@ -94,6 +94,7 @@ class ProxyCfg:
     host: str = "0.0.0.0"
     port: int = 9099
     log_level: str = "info"
+    tick_interval: float = 2.0  # uvicorn main-loop tick (s); default 0.1 causes 10 wakeups/s
 
 
 @dataclass
@@ -593,7 +594,8 @@ def build_app(manager: ProcessManager) -> FastAPI:
 
     @app.get("/proxy/status")
     async def status():
-        await manager.gpu.refresh()
+        # Use cached stats from the background monitor loop — do NOT call
+        # gpu.refresh() here; that would spawn rocm-smi on every poll request.
         stats = manager.gpu.stats
         return {
             "gpu": {
@@ -824,13 +826,28 @@ def main():
     manager = ProcessManager(config)
     app = build_app(manager)
 
-    uvicorn.run(
+    # Uvicorn's default main_loop sleeps 100 ms between ticks (hardcoded), which
+    # causes ~10 epoll_pwait wakeups per second even when fully idle — enough to
+    # prevent deep CPU C-states and add ~2 W of idle power.  We subclass Server
+    # and override main_loop to use a configurable, longer tick_interval.
+    class LowPowerServer(uvicorn.Server):
+        async def main_loop(self) -> None:
+            tick = config.proxy.tick_interval
+            counter = 0
+            should_exit = await self.on_tick(counter)
+            while not should_exit:
+                counter = (counter + 1) % 864000
+                await asyncio.sleep(tick)
+                should_exit = await self.on_tick(counter)
+
+    uv_cfg = uvicorn.Config(
         app,
         host=config.proxy.host,
         port=config.proxy.port,
         log_level=config.proxy.log_level,
         access_log=False,
     )
+    asyncio.run(LowPowerServer(uv_cfg).serve())
 
 
 if __name__ == "__main__":

@@ -62,7 +62,7 @@ class ServerCfg:
 class GpuCfg:
     device: int = 0
     vram_headroom_mb: int = 1024       # keep this free before starting a new server
-    poll_interval: float = 2.0
+    poll_interval: float = 5.0
 
 
 @dataclass
@@ -510,9 +510,7 @@ class ProcessManager:
         return await server.start()
 
     async def start_background_tasks(self):
-        self._bg_tasks.append(asyncio.create_task(self._gpu_poll_loop()))
-        self._bg_tasks.append(asyncio.create_task(self._idle_reaper_loop()))
-        self._bg_tasks.append(asyncio.create_task(self._loop_detector_loop()))
+        self._bg_tasks.append(asyncio.create_task(self._monitor_loop()))
 
     async def stop_all(self):
         for task in self._bg_tasks:
@@ -520,38 +518,60 @@ class ProcessManager:
         for server in self.servers.values():
             await server.stop()
 
-    async def _gpu_poll_loop(self):
-        while True:
-            try:
-                await self.gpu.refresh()
-                stats = self.gpu.stats
-                for server in self.servers.values():
-                    if server.state == State.RUNNING:
-                        server.record_gpu_util(stats.gpu_util_pct)
-            except Exception as e:
-                log.debug("GPU poll error: %s", e)
-            await asyncio.sleep(self.config.gpu.poll_interval)
+    async def _monitor_loop(self):
+        """Single consolidated background loop replaces three separate tasks.
 
-    async def _idle_reaper_loop(self):
-        while True:
-            await asyncio.sleep(30)
-            for server in self.servers.values():
-                if server.state == State.RUNNING and server.is_idle:
-                    log.info(
-                        "%s idle for >%ds — unloading",
-                        server.cfg.name, self.config.limits.idle_timeout,
-                    )
-                    await server.stop()
+        Sleeps for gpu.poll_interval seconds per cycle (default 5s).
+        GPU stats are only fetched when at least one server is running —
+        skipping the rocm-smi subprocess call entirely when idle, which
+        eliminates the thread-pool wakeups that cause spurious epoll activity.
 
-    async def _loop_detector_loop(self):
+        Idle-reaper and loop-detector checks run on their own counters so
+        their effective intervals remain independent of poll_interval.
+        """
+        idle_ticks = 0
+        loop_ticks = 0
+        poll = self.config.gpu.poll_interval
+        idle_every = max(1, round(30 / poll))          # reaper: ~30 s
+        loop_every = max(1, round(self.config.limits.loop_check_interval / poll))
+
         while True:
-            await asyncio.sleep(self.config.limits.loop_check_interval)
-            for server in self.servers.values():
-                if server.state == State.RUNNING and server.check_loop():
-                    log.error(
-                        "Killing %s due to suspected infinite loop", server.cfg.name
-                    )
-                    await server.stop()
+            await asyncio.sleep(poll)
+            idle_ticks += 1
+            loop_ticks += 1
+
+            running = [s for s in self.servers.values() if s.state == State.RUNNING]
+
+            # GPU stats — only worth fetching when something is actually running
+            if running:
+                try:
+                    await self.gpu.refresh()
+                    util = self.gpu.stats.gpu_util_pct
+                    for server in running:
+                        server.record_gpu_util(util)
+                except Exception as e:
+                    log.debug("GPU poll error: %s", e)
+
+            # Idle reaper (~30 s cadence)
+            if idle_ticks >= idle_every:
+                idle_ticks = 0
+                for server in running:
+                    if server.is_idle:
+                        log.info(
+                            "%s idle for >%ds — unloading",
+                            server.cfg.name, self.config.limits.idle_timeout,
+                        )
+                        await server.stop()
+
+            # Loop detector (loop_check_interval cadence)
+            if loop_ticks >= loop_every:
+                loop_ticks = 0
+                for server in running:
+                    if server.check_loop():
+                        log.error(
+                            "Killing %s due to suspected infinite loop", server.cfg.name
+                        )
+                        await server.stop()
 
 
 # ---------------------------------------------------------------------------

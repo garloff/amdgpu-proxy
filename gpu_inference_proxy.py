@@ -94,7 +94,7 @@ class ProxyCfg:
     host: str = "0.0.0.0"
     port: int = 9099
     log_level: str = "info"
-    tick_interval: float = 2.0  # uvicorn main-loop tick (s); default 0.1 causes 10 wakeups/s
+    tick_interval: float = 1.0  # uvicorn main-loop tick (s); default 0.1 causes 10 wakeups/s
 
 
 @dataclass

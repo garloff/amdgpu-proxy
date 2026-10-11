@@ -4,7 +4,8 @@ gpu_inference_proxy.py — GPU-aware AI inference proxy
 Manages llama.cpp, stable-diffusion.cpp, and whisper.cpp server processes
 based on demand, VRAM pressure, idle timeouts, and infinite-loop detection.
 
-Author: generated for Kurt @ S7n Cloud Services <s7h@garloff.de> by Claude
+Author: generated for Kurt @ S7n Cloud Services <s7n@garloff.de>
+Assisted-by: Claude Sonnet 4.6
 License: Apache-2.0
 """
 
@@ -219,6 +220,9 @@ class ManagedServer:
         self._proc: Optional[subprocess.Popen] = None
         self._ready_event = asyncio.Event()
         self._lock = asyncio.Lock()
+        # Serialises the startup sequence: only one coroutine runs it;
+        # all others wait on _ready_event instead of racing into start().
+        self._start_lock = asyncio.Lock()
         self._last_request_at: float = 0.0
         self._active_requests: int = 0
         # loop detection: (timestamp, util) ring buffer
@@ -274,56 +278,72 @@ class ManagedServer:
         return False
 
     async def start(self) -> bool:
-        """Start the server process. Returns True if successfully started."""
+        """Start the server process. Returns True if successfully started.
+
+        Safe to call concurrently: the first caller runs the startup loop
+        while subsequent callers wait on _ready_event via _start_lock.
+        """
+        # Fast path — already up.
         async with self._lock:
-            if self._state in (State.RUNNING, State.STARTING):
+            if self._state == State.RUNNING:
                 return True
-            self._state = State.STARTING
-            self._ready_event.clear()
 
-        env = os.environ.copy()
-        env.update(self.cfg.env)
-        cmd = [self.cfg.binary] + self.cfg.args
+        # Serialise the startup sequence.  If another coroutine is already
+        # inside the startup loop, we block here and then re-check state
+        # once it finishes (successfully or not).
+        async with self._start_lock:
+            # Re-check under the start lock: the previous holder may have
+            # brought the server up (or failed) while we were waiting.
+            async with self._lock:
+                if self._state == State.RUNNING:
+                    return True
+                if self._state != State.STARTING:
+                    self._state = State.STARTING
+                    self._ready_event.clear()
 
-        log.info("Starting %s: %s", self.cfg.name, " ".join(cmd))
-        try:
-            self._proc = subprocess.Popen(
-                cmd, env=env,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            )
-            # Drain stdout in background so the pipe never fills
-            asyncio.get_event_loop().run_in_executor(None, self._drain_stdout)
-        except FileNotFoundError:
-            log.error("Binary not found for %s: %s", self.cfg.name, self.cfg.binary)
-            self._state = State.STOPPED
+            env = os.environ.copy()
+            env.update(self.cfg.env)
+            cmd = [self.cfg.binary] + self.cfg.args
+
+            log.info("Starting %s: %s", self.cfg.name, " ".join(cmd))
+            try:
+                self._proc = subprocess.Popen(
+                    cmd, env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                )
+                # Drain stdout in background so the pipe never fills
+                asyncio.get_event_loop().run_in_executor(None, self._drain_stdout)
+            except FileNotFoundError:
+                log.error("Binary not found for %s: %s", self.cfg.name, self.cfg.binary)
+                self._state = State.STOPPED
+                return False
+
+            # Poll health endpoint until ready or timeout
+            deadline = time.monotonic() + self.cfg.startup_timeout
+            async with httpx.AsyncClient() as client:
+                while time.monotonic() < deadline:
+                    if self._proc.poll() is not None:
+                        log.error("%s exited during startup (rc=%d)", self.cfg.name, self._proc.returncode)
+                        self._state = State.STOPPED
+                        return False
+                    try:
+                        r = await client.get(
+                            f"{self.base_url}{self.cfg.health_path}", timeout=2.0
+                        )
+                        if r.status_code < 500:
+                            log.info("%s is ready (status %d)", self.cfg.name, r.status_code)
+                            self._state = State.RUNNING
+                            self._last_request_at = time.monotonic()
+                            self._last_completed_at = time.monotonic()
+                            self._ready_event.set()
+                            return True
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.5)
+
+            log.error("%s failed to become ready within %ds", self.cfg.name, self.cfg.startup_timeout)
+            await self.stop()
             return False
-
-        # Poll health endpoint until ready or timeout
-        deadline = time.monotonic() + self.cfg.startup_timeout
-        async with httpx.AsyncClient() as client:
-            while time.monotonic() < deadline:
-                if self._proc.poll() is not None:
-                    log.error("%s exited during startup (rc=%d)", self.cfg.name, self._proc.returncode)
-                    self._state = State.STOPPED
-                    return False
-                try:
-                    r = await client.get(
-                        f"{self.base_url}{self.cfg.health_path}", timeout=2.0
-                    )
-                    if r.status_code < 500:
-                        log.info("%s is ready (status %d)", self.cfg.name, r.status_code)
-                        self._state = State.RUNNING
-                        self._last_request_at = time.monotonic()
-                        self._last_completed_at = time.monotonic()
-                        self._ready_event.set()
-                        return True
-                except Exception:
-                    pass
-                await asyncio.sleep(0.5)
-
-        log.error("%s failed to become ready within %ds", self.cfg.name, self.cfg.startup_timeout)
-        await self.stop()
-        return False
 
     async def stop(self):
         async with self._lock:

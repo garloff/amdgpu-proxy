@@ -754,6 +754,13 @@ def build_app(manager: ProcessManager) -> FastAPI:
             # Check if client wants streaming (SSE / chunked)
             accept = request.headers.get("accept", "")
             wants_stream = "text/event-stream" in accept or "stream" in accept
+            # ALSO check the JSON body for "stream": true
+            if not wants_stream and body:
+                try:
+                    if json.loads(body).get("stream") is True:
+                        wants_stream = True
+                except Exception:
+                    pass
 
             if wants_stream:
                 async def stream_gen():
